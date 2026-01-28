@@ -1,10 +1,4 @@
--- client.lua (QB-Ambulancejob ready) ✅
--- ✅ Cura SIEMPRE (vivo / herido / laststand / muerto)
--- ✅ Blips por cada doctor (Config.Blip)
--- ✅ Progressbar estable (export cuando down)
--- ✅ No spam: blocks si ya hay progressbar activo
--- ✅ Mantiene: jg-textui / ox_target / qb-target
-
+-- client.lua
 local FW = nil
 local ESX = nil
 local isQB = false
@@ -178,6 +172,7 @@ local function runProgress(label, durationMs, onDone, onCancel)
 
   local downNow = IsPlayerDown()
 
+  -- anti spam
   if getResState('progressbar') == "started" then
     local okBusy, isBusyNow = pcall(function()
       return exports['progressbar']:isDoingSomething()
@@ -221,7 +216,7 @@ local function runProgress(label, durationMs, onDone, onCancel)
           disableMouse = false,
           disableCombat = true,
         },
-        animation = {}, -- sin anim down
+        animation = {},
         prop = {},
         propTwo = {}
       }, function(cancelled)
@@ -244,7 +239,7 @@ local function runProgress(label, durationMs, onDone, onCancel)
       "izaap_npc_doctor",
       label or "Receiving medical attention...",
       durationMs or 5000,
-      true,
+      true, 
       true,
       { disableMovement = true, disableCarMovement = true, disableMouse = false, disableCombat = true },
       animData,
@@ -527,6 +522,7 @@ RegisterNetEvent('izaap_npc:client:doRevive', function()
 
   ApplyTreatment()
 end)
+
 
 local function addTargetsForAll()
   local inter = Config and Config.Interaction or {}
