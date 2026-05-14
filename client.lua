@@ -1,65 +1,53 @@
 -- client.lua
-local FW = nil
-local ESX = nil
-local isQB = false
-local isESX = false
+local FW      = nil
+local ESX     = nil
+local isQB    = false
+local isESX   = false
 
-local lastUse = 0
+local lastUse    = 0
 local doctorPeds = {}
-local doctorBlips = {} 
-local showingJG = false
-local busy = false
+local doctorBlips = {}
+local showingJG  = false
+local busy       = false
+
+local CFG_Inter    = {}
+local CFG_Messages = {}
+local CFG_Blip     = {}
+local CFG_Doctors  = {}
 
 local function getResState(name)
-  local ok, st = pcall(GetResourceState, name)
-  if not ok then return "missing" end
-  return st or "missing"
+  return GetResourceState(name) or "missing"
 end
 
 local function detectFramework()
   local qbState  = getResState('qb-core')
   local qbxState = getResState('qbx_core')
   local esxState = getResState('es_extended')
+  local cfg      = tostring((Config and Config.Framework) or "auto"):lower()
 
-  local cfg = tostring((Config and Config.Framework) or "auto"):lower()
-
-  if cfg == "qb" and qbState == "started" then
-    FW = exports['qb-core']:GetCoreObject()
-    isQB, isESX = true, false
-    return true
+  local function tryQB(res, export)
+    if getResState(res) == "started" then
+      FW = exports[export]:GetCoreObject()
+      isQB, isESX = true, false
+      return true
+    end
   end
 
-  if cfg == "qbx" and qbxState == "started" then
-    FW = exports['qbx_core']:GetCoreObject()
-    isQB, isESX = true, false
-    return true
+  local function tryESX()
+    if esxState == "started" then
+      ESX = exports["es_extended"]:getSharedObject()
+      isQB, isESX = false, true
+      return true
+    end
   end
 
-  if cfg == "esx" and esxState == "started" then
-    ESX = exports["es_extended"]:getSharedObject()
-    isQB, isESX = false, true
-    return true
-  end
+  if cfg == "qb"  then return tryQB('qb-core',  'qb-core')  end
+  if cfg == "qbx" then return tryQB('qbx_core', 'qbx_core') end
+  if cfg == "esx" then return tryESX() end
 
-  if qbState == "started" then
-    FW = exports['qb-core']:GetCoreObject()
-    isQB, isESX = true, false
-    return true
-  end
-
-  if qbxState == "started" then
-    FW = exports['qbx_core']:GetCoreObject()
-    isQB, isESX = true, false
-    return true
-  end
-
-  if esxState == "started" then
-    ESX = exports["es_extended"]:getSharedObject()
-    isQB, isESX = false, true
-    return true
-  end
-
-  return false
+  return tryQB('qb-core',  'qb-core')
+      or tryQB('qbx_core', 'qbx_core')
+      or tryESX()
 end
 
 CreateThread(function()
@@ -76,110 +64,106 @@ local function Notify(msg, msgType)
 
   if isQB and FW and FW.Functions and FW.Functions.Notify then
     FW.Functions.Notify(msg, msgType or 'primary')
-    return
-  end
-
-  if isESX and ESX and ESX.ShowNotification then
+  elseif isESX and ESX and ESX.ShowNotification then
     ESX.ShowNotification(msg)
-    return
+  else
+    TriggerEvent('chat:addMessage', { args = { 'Doctor', msg } })
   end
-
-  TriggerEvent('chat:addMessage', { args = { 'Doctor', msg } })
 end
 
 RegisterNetEvent('izaap_npc:client:notify', function(msg, msgType)
   Notify(msg, msgType)
 end)
 
+local DOWN_STATES = { isDead=true, inLastStand=true, dead=true, laststand=true, isLaststand=true }
+
 local function IsPlayerDown()
   local ped = PlayerPedId()
-
   if LocalPlayer and LocalPlayer.state then
     local st = LocalPlayer.state
-    if st.isDead == true then return true end
-    if st.inLastStand == true then return true end
-    if st.dead == true then return true end
-    if st.laststand == true then return true end
-    if st.isLaststand == true then return true end
+    for key in pairs(DOWN_STATES) do
+      if st[key] == true then return true end
+    end
   end
-
-  if IsEntityDead(ped) or IsPedDeadOrDying(ped, true) then
-    return true
-  end
-
-  return false
+  return IsEntityDead(ped) or IsPedDeadOrDying(ped, true)
 end
 
 local function ApplyTreatment()
   local ped = PlayerPedId()
-  local maxH = GetEntityMaxHealth(ped)
-  if not maxH or maxH <= 0 then maxH = 200 end
-
   if IsPlayerDown() then
     TriggerEvent('izaap_npc:client:doRevive')
     return
   end
+  local maxH = GetEntityMaxHealth(ped)
+  SetEntityHealth(ped, (maxH and maxH > 0) and maxH or 200)
+  pcall(TriggerEvent, 'hospital:client:ResetLimbs')
+  pcall(TriggerEvent, 'hospital:client:RemoveBleed')
+  pcall(TriggerEvent, 'hospital:client:ResetBloodDamage')
+end
 
-  SetEntityHealth(ped, maxH)
+local jgStarted = nil 
 
-  pcall(function() TriggerEvent('hospital:client:ResetLimbs') end)
-  pcall(function() TriggerEvent('hospital:client:RemoveBleed') end)
-  pcall(function() TriggerEvent('hospital:client:ResetBloodDamage') end)
+local function isJGStarted()
+  if jgStarted == nil then
+    jgStarted = getResState('jg-textui') == "started"
+  end
+  return jgStarted
 end
 
 local function JG_Show(text)
-  if getResState('jg-textui') ~= "started" then return false end
-  local inter = Config and Config.Interaction or {}
-  local pos = (inter.JGTextUI and inter.JGTextUI.Position) or "left"
-
-  pcall(function()
-    exports['jg-textui']:DrawText(text, pos)
-  end)
-
+  if not isJGStarted() then return false end
+  pcall(exports['jg-textui'].DrawText, exports['jg-textui'], text, CFG_Inter.JGTextUI and CFG_Inter.JGTextUI.Position or "left")
   showingJG = true
   return true
 end
 
 local function JG_Hide()
   if not showingJG then return end
-  if getResState('jg-textui') ~= "started" then
-    showingJG = false
-    return
+  if isJGStarted() then
+    pcall(exports['jg-textui'].HideText, exports['jg-textui'])
   end
-
-  pcall(function()
-    exports['jg-textui']:HideText()
-  end)
-
   showingJG = false
 end
 
 local function loadAnimDict(dict)
   if HasAnimDictLoaded(dict) then return true end
   RequestAnimDict(dict)
-  local t = 0
-  while not HasAnimDictLoaded(dict) and t < 200 do
+  for _ = 1, 200 do
+    if HasAnimDictLoaded(dict) then return true end
     Wait(10)
-    t = t + 1
   end
-  return HasAnimDictLoaded(dict)
+  return false
+end
+
+local function loadModel(model)
+  local m = joaat(model)
+  if HasModelLoaded(m) then return m end
+  RequestModel(m)
+  for _ = 1, 250 do
+    if HasModelLoaded(m) then return m end
+    Wait(10)
+  end
+  return nil
+end
+
+local ANIM_DICT = "amb@medic@standing@tendtodead@base"
+local ANIM_CLIP = "base"
+
+local pbStarted = nil
+local function isPBStarted()
+  if pbStarted == nil then pbStarted = getResState('progressbar') == "started" end
+  return pbStarted
 end
 
 local function runProgress(label, durationMs, onDone, onCancel)
-  local ped = PlayerPedId()
-  local animDict = "amb@medic@standing@tendtodead@base"
-  local animClip = "base"
-
+  local ped     = PlayerPedId()
   local downNow = IsPlayerDown()
+  durationMs    = durationMs or 5000
+  label         = label or "Receiving medical attention..."
 
-  -- anti spam
-  if getResState('progressbar') == "started" then
-    local okBusy, isBusyNow = pcall(function()
-      return exports['progressbar']:isDoingSomething()
-    end)
-    if okBusy and isBusyNow then
-      return
-    end
+  if isPBStarted() then
+    local ok, isBusy = pcall(function() return exports['progressbar']:isDoingSomething() end)
+    if ok and isBusy then return end
   end
 
   busy = true
@@ -187,92 +171,43 @@ local function runProgress(label, durationMs, onDone, onCancel)
 
   local function cleanup()
     busy = false
-    if not downNow then
-      ClearPedTasks(ped)
+    if not downNow then ClearPedTasks(ped) end
+  end
+
+  local function done()   cleanup(); if onDone   then onDone()   end end
+  local function cancel() cleanup(); if onCancel then onCancel() end end
+
+  local controls = { disableMovement=true, disableCarMovement=true, disableMouse=false, disableCombat=true }
+  local animData = {}
+  if not downNow then
+    animData = { animDict=ANIM_DICT, anim=ANIM_CLIP, flags=1 }
+    if loadAnimDict(ANIM_DICT) then
+      TaskPlayAnim(ped, ANIM_DICT, ANIM_CLIP, 1.0, 1.0, -1, 1, 0.0, false, false, false)
     end
   end
 
-  local function done()
-    cleanup()
-    if onDone then onDone() end
-  end
-
-  local function cancel()
-    cleanup()
-    if onCancel then onCancel() end
-  end
-
-  if downNow and getResState('progressbar') == "started" then
-    local ok = pcall(function()
-      exports['progressbar']:Progress({
-        name = "izaap_npc_doctor",
-        duration = durationMs or 5000,
-        label = label or "Receiving medical attention...",
-        useWhileDead = true,
-        canCancel = true,
-        controlDisables = {
-          disableMovement = true,
-          disableCarMovement = true,
-          disableMouse = false,
-          disableCombat = true,
-        },
-        animation = {},
-        prop = {},
-        propTwo = {}
-      }, function(cancelled)
-        if cancelled then cancel() else done() end
-      end)
-    end)
-    if ok then return end
-  end
 
   if isQB and FW and FW.Functions and FW.Functions.Progressbar then
-    local animData = {}
-    if not downNow then
-      animData = { animDict = animDict, anim = animClip, flags = 1 }
-      if loadAnimDict(animDict) then
-        TaskPlayAnim(ped, animDict, animClip, 1.0, 1.0, -1, 1, 0.0, false, false, false)
-      end
-    end
-
     FW.Functions.Progressbar(
-      "izaap_npc_doctor",
-      label or "Receiving medical attention...",
-      durationMs or 5000,
-      true, 
-      true,
-      { disableMovement = true, disableCarMovement = true, disableMouse = false, disableCombat = true },
-      animData,
-      {}, {},
+      "izaap_npc_doctor", label, durationMs,
+      true, true, controls, animData, {}, {},
       function() done() end,
       function() cancel() end
     )
     return
   end
 
-  if getResState('progressbar') == "started" then
-    if not downNow then
-      if loadAnimDict(animDict) then
-        TaskPlayAnim(ped, animDict, animClip, 1.0, 1.0, -1, 1, 0.0, false, false, false)
-      end
-    end
-
+  if isPBStarted() then
     local ok = pcall(function()
       exports['progressbar']:Progress({
-        name = "izaap_npc_doctor",
-        duration = durationMs or 5000,
-        label = label or "Receiving medical attention...",
-        useWhileDead = true,
-        canCancel = true,
-        controlDisables = {
-          disableMovement = true,
-          disableCarMovement = true,
-          disableMouse = false,
-          disableCombat = true,
-        },
-        animation = downNow and {} or { animDict = animDict, anim = animClip, flags = 1 },
-        prop = {},
-        propTwo = {}
+        name            = "izaap_npc_doctor",
+        duration        = durationMs,
+        label           = label,
+        useWhileDead    = true,
+        canCancel       = true,
+        controlDisables = controls,
+        animation       = downNow and {} or animData,
+        prop = {}, propTwo = {}
       }, function(cancelled)
         if cancelled then cancel() else done() end
       end)
@@ -281,50 +216,29 @@ local function runProgress(label, durationMs, onDone, onCancel)
   end
 
   CreateThread(function()
-    local endT = GetGameTimer() + (durationMs or 5000)
+    local endT = GetGameTimer() + durationMs
     while GetGameTimer() < endT do
-      DisableControlAction(0, 24, true)
-      DisableControlAction(0, 25, true)
-      DisableControlAction(0, 21, true)
-      DisableControlAction(0, 22, true)
-      DisableControlAction(0, 23, true)
-      DisableControlAction(0, 75, true)
-      DisableControlAction(0, 30, true)
-      DisableControlAction(0, 31, true)
-      if IsControlJustPressed(0, 177) then
-        cancel()
-        return
+      for _, ctrl in ipairs({ 24,25,21,22,23,75,30,31 }) do
+        DisableControlAction(0, ctrl, true)
       end
+      if IsControlJustPressed(0, 177) then cancel(); return end
       Wait(0)
     end
     done()
   end)
 end
 
-local function loadModel(model)
-  local m = joaat(model)
-  if HasModelLoaded(m) then return m end
-  RequestModel(m)
-  local t = 0
-  while not HasModelLoaded(m) and t < 250 do
-    Wait(10)
-    t = t + 1
-  end
-  if not HasModelLoaded(m) then return nil end
-  return m
-end
 
 local function spawnOneDoctor(def)
-  def = def or {}
+  if not def then return nil end
   local model = loadModel(def.Model or "s_m_m_doctor_01")
   if not model then
-    print('The doctors model could not be loaded: ' .. tostring(def.Model))
+    print('Doctor model could not be loaded: ' .. tostring(def.Model))
     return nil
   end
-
   local c = def.Coords
   if not c then
-    print('Doctor without coordinates in configuration.')
+    print('Doctor entry has no Coords in config.')
     return nil
   end
 
@@ -340,179 +254,120 @@ local function spawnOneDoctor(def)
   SetPedHearingRange(ped, 0.0)
   SetPedAlertness(ped, 0)
   SetBlockingOfNonTemporaryEvents(ped, def.BlockEvents == true)
-
   if def.Invincible then SetEntityInvincible(ped, true) end
-  if def.Freeze then FreezeEntityPosition(ped, true) end
-
+  if def.Freeze     then FreezeEntityPosition(ped, true) end
   if def.Scenario and def.Scenario ~= "" then
     TaskStartScenarioInPlace(ped, def.Scenario, 0, true)
   end
-
   return ped
 end
 
+
 local function ClearDoctorBlips()
-  for i = 1, #doctorBlips do
-    local b = doctorBlips[i]
-    if b and DoesBlipExist(b) then
-      RemoveBlip(b)
-    end
+  for _, b in ipairs(doctorBlips) do
+    if DoesBlipExist(b) then RemoveBlip(b) end
   end
   doctorBlips = {}
 end
 
 local function AddDoctorBlipAtCoords(coords)
-  local bl = (Config and Config.Blip) or {}
-  if bl.Enabled ~= true then return nil end
-  if not coords then return nil end
-
-  local x, y, z
-  if type(coords) == "vector4" then
-    x, y, z = coords.x, coords.y, coords.z
-  elseif type(coords) == "vector3" then
-    x, y, z = coords.x, coords.y, coords.z
-  elseif type(coords) == "table" then
-    x, y, z = coords.x, coords.y, coords.z
-  end
-  if not x or not y or not z then return nil end
-
-  local b = AddBlipForCoord(x, y, z)
-  SetBlipSprite(b, tonumber(bl.Sprite) or 61)
+  if CFG_Blip.Enabled ~= true or not coords then return end
+  local b = AddBlipForCoord(coords.x, coords.y, coords.z)
+  SetBlipSprite(b, CFG_Blip.Sprite  or 61)
   SetBlipDisplay(b, 4)
-  SetBlipScale(b, tonumber(bl.Scale) or 0.8)
-  SetBlipColour(b, tonumber(bl.Color) or 2)
+  SetBlipScale(b,   CFG_Blip.Scale  or 0.8)
+  SetBlipColour(b,  CFG_Blip.Color  or 2)
   SetBlipAsShortRange(b, true)
-
   BeginTextCommandSetBlipName("STRING")
-  AddTextComponentString(tostring(bl.Name or "Doctor"))
+  AddTextComponentString(tostring(CFG_Blip.Name or "Doctor"))
   EndTextCommandSetBlipName(b)
-
   doctorBlips[#doctorBlips + 1] = b
-  return b
 end
 
-local function BuildDoctorBlipsFromConfig()
-  ClearDoctorBlips()
 
-  local bl = (Config and Config.Blip) or {}
-  if bl.Enabled ~= true then return end
-
-  local list = (Config and Config.Doctors) or nil
-  if type(list) ~= "table" or #list == 0 then
-    if Config and Config.Doctor and Config.Doctor.Coords then
-      list = { Config.Doctor }
-    else
-      return
-    end
+local function getDoctorList()
+  if type(CFG_Doctors) == "table" and #CFG_Doctors > 0 then
+    return CFG_Doctors
   end
-
-  for i = 1, #list do
-    local d = list[i] or {}
-    if d.Coords then
-      AddDoctorBlipAtCoords(d.Coords)
-    end
+  if Config and Config.Doctor and Config.Doctor.Coords then
+    return { Config.Doctor }
   end
+  return nil
 end
 
 local function spawnDoctors()
   doctorPeds = {}
-
-  local list = (Config and Config.Doctors) or nil
-  if type(list) ~= "table" or #list == 0 then
-    if Config and Config.Doctor and Config.Doctor.Coords then
-      list = { Config.Doctor }
-    else
-      print("Config.Doctors is empty.")
-      return
-    end
-  end
-
-  for i = 1, #list do
-    local ped = spawnOneDoctor(list[i])
+  local list = getDoctorList()
+  if not list then print("Config.Doctors is empty."); return end
+  for _, def in ipairs(list) do
+    local ped = spawnOneDoctor(def)
     if ped and DoesEntityExist(ped) then
       doctorPeds[#doctorPeds + 1] = ped
     end
   end
 end
 
-local function getNearestDoctor(maxDist)
-  local inter = Config and Config.Interaction or {}
-  maxDist = maxDist or (inter.Distance or 2.2)
-
-  local ped = PlayerPedId()
-  local pcoords = GetEntityCoords(ped)
-
-  local bestPed, bestD = nil, 999999.0
-  for i = 1, #doctorPeds do
-    local dp = doctorPeds[i]
-    if dp and DoesEntityExist(dp) then
-      local d = #(pcoords - GetEntityCoords(dp))
-      if d < bestD then
-        bestD = d
-        bestPed = dp
-      end
-    end
+local function BuildDoctorBlipsFromConfig()
+  ClearDoctorBlips()
+  if CFG_Blip.Enabled ~= true then return end
+  local list = getDoctorList()
+  if not list then return end
+  for _, d in ipairs(list) do
+    if d.Coords then AddDoctorBlipAtCoords(d.Coords) end
   end
-
-  if bestPed and bestD <= maxDist then
-    return bestPed, bestD
-  end
-  return nil, nil
 end
 
+
+local function getNearestDoctor(maxDist)
+  maxDist = maxDist or CFG_Inter.Distance or 2.2
+  local pcoords = GetEntityCoords(PlayerPedId())
+  local bestPed, bestD = nil, maxDist + 0.01
+
+  for _, dp in ipairs(doctorPeds) do
+    if dp and DoesEntityExist(dp) then
+      local d = #(pcoords - GetEntityCoords(dp))
+      if d < bestD then bestD = d; bestPed = dp end
+    end
+  end
+  return bestPed
+end
+
+
 local function canUseNow()
+  if busy then return false, "busy" end
   local now = GetGameTimer()
-  if busy then
-    return false, "busy"
-  end
-  if (now - lastUse) < ((Config and Config.CooldownMs) or 5000) then
-    return false, "cooldown"
-  end
+  if (now - lastUse) < (Config and Config.CooldownMs or 5000) then return false, "cooldown" end
   lastUse = now
-  return true, nil
+  return true
 end
 
 local function doPayAndTreat()
   local ok, why = canUseNow()
   if not ok then
-    local msgs = (Config and Config.Messages) or {}
-    if why == "busy" then
-      Notify(msgs.Busy or "You cannot use this service right now.", "error")
-    else
-      Notify(msgs.Cooldown or "Wait a moment before using the doctor again.", "error")
-    end
+    Notify(why == "busy" and (CFG_Messages.Busy or "You cannot use this service right now.")
+                          or (CFG_Messages.Cooldown or "Wait a moment before using the doctor again."), "error")
     return
   end
 
   runProgress(
-    "Doctor: applying treatment...",
-    5000,
-    function()
-      TriggerServerEvent('izaap_npc:server:payAndRevive')
-    end,
-    function()
-      Notify("Cancelled.", "error")
-    end
+    "Doctor: applying treatment...", 5000,
+    function() TriggerServerEvent('izaap_npc:server:payAndRevive') end,
+    function() Notify("Cancelled.", "error") end
   )
 end
+
 
 RegisterNetEvent('izaap_npc:client:doRevive', function()
   local choice = tostring((Config and Config.ReviveEvent) or "qb"):lower()
 
   if choice == "qb" then
-    pcall(function()
-      TriggerEvent('hospital:client:Revive')
-    end)
+    pcall(TriggerEvent, 'hospital:client:Revive')
   elseif choice == "qbplayer" then
-    pcall(function()
-      TriggerEvent('hospital:client:RevivePlayer')
-    end)
+    pcall(TriggerEvent, 'hospital:client:RevivePlayer')
   elseif choice == "custom" then
     local ev = tostring((Config and Config.CustomReviveEvent) or "")
     if ev ~= "" then
-      pcall(function()
-        TriggerEvent(ev)
-      end)
+      pcall(TriggerEvent, ev)
     else
       Notify("Config.CustomReviveEvent is empty.", "error")
     end
@@ -525,72 +380,50 @@ end)
 
 
 local function addTargetsForAll()
-  local inter = Config and Config.Interaction or {}
-  local targetCfg = inter.Target or {}
-
+  local targetCfg = CFG_Inter.Target or {}
   local label = targetCfg.Label or "Doctor - Treatment"
   local icon  = targetCfg.Icon  or "fas fa-user-doctor"
-  local dist  = inter.Distance or 2.2
+  local dist  = CFG_Inter.Distance or 2.2
+  local added = false
 
-  local hasAny = false
+  local hasOX = getResState('ox_target')  == "started"
+  local hasQB = getResState('qb-target') == "started"
 
-  for i = 1, #doctorPeds do
-    local ped = doctorPeds[i]
+  for i, ped in ipairs(doctorPeds) do
     if ped and DoesEntityExist(ped) then
-      if getResState('ox_target') == "started" then
-        exports.ox_target:addLocalEntity(ped, {
-          {
-            name = 'izaap_npc_doctor_' .. i,
-            label = label,
-            icon = icon,
-            distance = dist,
-            onSelect = function()
-              doPayAndTreat()
-            end
-          }
-        })
-        hasAny = true
-      elseif getResState('qb-target') == "started" then
+      if hasOX then
+        exports.ox_target:addLocalEntity(ped, {{
+          name     = 'izaap_npc_doctor_' .. i,
+          label    = label,
+          icon     = icon,
+          distance = dist,
+          onSelect = doPayAndTreat,
+        }})
+        added = true
+      elseif hasQB then
         exports['qb-target']:AddTargetEntity(ped, {
-          options = {
-            {
-              icon = icon,
-              label = label,
-              action = function()
-                doPayAndTreat()
-              end
-            }
-          },
-          distance = dist
+          options  = {{ icon=icon, label=label, action=doPayAndTreat }},
+          distance = dist,
         })
-        hasAny = true
+        added = true
       end
     end
   end
-
-  return hasAny
+  return added
 end
 
 local function runJGTextUI()
-  local inter = Config and Config.Interaction or {}
-  local jg = inter.JGTextUI or {}
-
-  local label = jg.Label or "Doctor ($500) - Press [E]"
-  local dist = inter.Distance or 2.2
+  local jgCfg = CFG_Inter.JGTextUI or {}
+  local label = jgCfg.Label or "Doctor ($500) - Press [E]"
+  local dist  = CFG_Inter.Distance or 2.2
 
   CreateThread(function()
     while true do
       Wait(250)
+      if busy then JG_Hide() goto continue end
 
-      if busy then
-        JG_Hide()
-        goto continue
-      end
-
-      local nearPed = getNearestDoctor(dist)
-      if nearPed then
+      if getNearestDoctor(dist) then
         JG_Show(label)
-
         if IsControlJustPressed(0, 38) then
           doPayAndTreat()
           Wait(500)
@@ -605,23 +438,19 @@ local function runJGTextUI()
 end
 
 local function setupInteraction()
-  local inter = Config and Config.Interaction or {}
-  local mode = tostring(inter.Mode or "auto"):lower()
+  local mode = tostring(CFG_Inter.Mode or "auto"):lower()
 
   if mode == "auto" then
     local ok = addTargetsForAll()
-    if not ok and inter.JGTextUI and inter.JGTextUI.Enabled then
-      runJGTextUI()
-      ok = true
+    if not ok and CFG_Inter.JGTextUI and CFG_Inter.JGTextUI.Enabled then
+      runJGTextUI(); ok = true
     end
-    if not ok then
-      Notify("No interaction method available (target/jg-textui).", "error")
-    end
+    if not ok then Notify("No interaction method available (target/jg-textui).", "error") end
     return
   end
 
   if mode == "jg-textui" or mode == "jg_textui" then
-    if getResState('jg-textui') ~= "started" then
+    if not isJGStarted() then
       Notify("jg-textui is not started. Change Config.Interaction.Mode or start the resource.", "error")
       return
     end
@@ -629,33 +458,32 @@ local function setupInteraction()
     return
   end
 
-  if mode == "ox-target" or mode == "ox_target" or mode == "qb-target" or mode == "qb_target" then
-    local ok = addTargetsForAll()
-    if not ok then
-      Notify("Target is not started. Change Config.Interaction.Mode.", "error")
-    end
-    return
+  -- ox-target / qb-target
+  if not addTargetsForAll() then
+    Notify("Target is not started. Change Config.Interaction.Mode.", "error")
   end
 end
 
+
 CreateThread(function()
   Wait(500)
+  CFG_Inter    = (Config and Config.Interaction) or {}
+  CFG_Messages = (Config and Config.Messages)    or {}
+  CFG_Blip     = (Config and Config.Blip)        or {}
+  CFG_Doctors  = (Config and Config.Doctors)     or {}
+
   spawnDoctors()
   BuildDoctorBlipsFromConfig()
   Wait(500)
   setupInteraction()
 end)
 
+
 AddEventHandler('onResourceStop', function(res)
   if res ~= GetCurrentResourceName() then return end
   JG_Hide()
-
   ClearDoctorBlips()
-
-  for i = 1, #doctorPeds do
-    local ped = doctorPeds[i]
-    if ped and DoesEntityExist(ped) then
-      DeleteEntity(ped)
-    end
+  for _, ped in ipairs(doctorPeds) do
+    if ped and DoesEntityExist(ped) then DeleteEntity(ped) end
   end
 end)
